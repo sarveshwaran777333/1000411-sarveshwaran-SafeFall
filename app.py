@@ -1916,9 +1916,7 @@ with st.expander(
 
 if uploaded_video is not None:
 
-    video_bytes = (
-        uploaded_video.getvalue()
-    )
+    video_bytes = uploaded_video.getvalue()
 
     st.write(
         "### 🎞️ Uploaded Video"
@@ -1945,13 +1943,15 @@ if uploaded_video is not None:
 
     if analyse_button:
 
+        # Preserve the original video file extension
         extension = os.path.splitext(
             uploaded_video.name
-        )[1]
+        )[1].lower()
 
+        # If the uploaded file has no extension,
+        # use AVI because the testing videos are AVI.
         if not extension:
-
-            extension = ".mp4"
+            extension = ".avi"
 
         temporary_path = None
 
