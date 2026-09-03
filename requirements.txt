@@ -3,6 +3,6 @@ numpy
 pandas
 opencv-python-headless==4.12.0.88
 scikit-learn==1.8.0
-mediapipe==0.10.33
 joblib
 kagglehub
+mediapipe==0.10.33 --no-deps
