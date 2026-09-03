@@ -31,7 +31,9 @@ st.set_page_config(
 # PATHS
 # ============================================================
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(
+    os.path.abspath(__file__)
+)
 
 MODEL_PATH = os.path.join(
     PROJECT_ROOT,
@@ -42,6 +44,38 @@ MODEL_PATH = os.path.join(
 POSE_MODEL_PATH = os.path.join(
     PROJECT_ROOT,
     "pose_landmarker_full.task"
+)
+
+
+# ============================================================
+# EXPECTED TRAINING FEATURES
+#
+# These MUST remain consistent with train_model.py
+# ============================================================
+
+EXPECTED_BASE_FEATURES = [
+    "aspect_ratio",
+    "torso_angle",
+    "hip_y",
+    "torso_ratio",
+    "bbox_w",
+    "bbox_h",
+    "v_hip_y",
+    "v_torso_angle"
+]
+
+EXPECTED_TEMPORAL_FEATURES = [
+    "rolling_max_v_hip",
+    "rolling_mean_angle",
+    "rolling_max_aspect",
+    "rolling_min_hip_y",
+    "angle_change_range"
+]
+
+EXPECTED_FEATURE_COUNT = (
+    len(EXPECTED_BASE_FEATURES)
+    +
+    len(EXPECTED_TEMPORAL_FEATURES)
 )
 
 
@@ -57,7 +91,30 @@ def load_model_package():
             f"SafeFall model not found:\n{MODEL_PATH}"
         )
 
-    return joblib.load(MODEL_PATH)
+    package = joblib.load(
+        MODEL_PATH
+    )
+
+    required_keys = [
+        "model",
+        "feature_columns",
+        "labels",
+        "accuracy"
+    ]
+
+    missing_keys = [
+        key
+        for key in required_keys
+        if key not in package
+    ]
+
+    if missing_keys:
+        raise KeyError(
+            "The trained model package is missing "
+            f"required keys: {missing_keys}"
+        )
+
+    return package
 
 
 # ============================================================
@@ -68,7 +125,8 @@ def create_pose_detector():
 
     if not os.path.exists(POSE_MODEL_PATH):
         raise FileNotFoundError(
-            f"MediaPipe pose model not found:\n{POSE_MODEL_PATH}"
+            f"MediaPipe pose model not found:\n"
+            f"{POSE_MODEL_PATH}"
         )
 
     base_options = python.BaseOptions(
@@ -90,10 +148,94 @@ def create_pose_detector():
 
 
 # ============================================================
+# SAFE LANDMARK VISIBILITY
+#
+# MediaPipe Tasks landmark objects normally provide visibility.
+# This helper also handles versions where the attribute may be
+# absent or invalid.
+# ============================================================
+
+def get_landmark_visibility(point):
+
+    if point is None:
+        return 0.0
+
+    try:
+        visibility = getattr(
+            point,
+            "visibility",
+            None
+        )
+
+        if visibility is None:
+            return 1.0
+
+        visibility = float(
+            visibility
+        )
+
+        if not np.isfinite(
+            visibility
+        ):
+            return 0.0
+
+        return float(
+            np.clip(
+                visibility,
+                0.0,
+                1.0
+            )
+        )
+
+    except (
+        TypeError,
+        ValueError,
+        AttributeError
+    ):
+        return 0.0
+
+
+# ============================================================
+# SAFE LANDMARK COORDINATES
+# ============================================================
+
+def landmark_coordinates_are_valid(
+    point
+):
+
+    if point is None:
+        return False
+
+    try:
+
+        x = float(
+            point.x
+        )
+
+        y = float(
+            point.y
+        )
+
+        return (
+            np.isfinite(x)
+            and
+            np.isfinite(y)
+        )
+
+    except (
+        TypeError,
+        ValueError,
+        AttributeError
+    ):
+
+        return False
+
+
+# ============================================================
 # BASE POSE FEATURES
 #
 # IMPORTANT:
-# This matches train_model.py
+# This keeps the same 8 base features used during training.
 # ============================================================
 
 def calculate_features(
@@ -101,10 +243,17 @@ def calculate_features(
     previous_landmarks=None
 ):
 
-    if landmarks is None or len(landmarks) < 25:
+    if (
+        landmarks is None
+        or
+        len(landmarks) < 25
+    ):
         return None
 
+    # --------------------------------------------------------
     # Important body joints
+    # --------------------------------------------------------
+
     left_shoulder = landmarks[11]
     right_shoulder = landmarks[12]
 
@@ -119,12 +268,30 @@ def calculate_features(
     ]
 
     # --------------------------------------------------------
-    # Visibility check
+    # Validate important landmark coordinates
     # --------------------------------------------------------
 
-    if min(
-        getattr(point, "visibility", 0.0)
+    if not all(
+        landmark_coordinates_are_valid(point)
         for point in important_points
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # Visibility check
+    #
+    # MediaPipe Tasks NormalizedLandmark normally exposes
+    # visibility. The helper prevents a missing/invalid field
+    # from crashing the pipeline.
+    # --------------------------------------------------------
+
+    important_visibility = [
+        get_landmark_visibility(point)
+        for point in important_points
+    ]
+
+    if min(
+        important_visibility
     ) < 0.25:
         return None
 
@@ -132,13 +299,29 @@ def calculate_features(
     # Visible pose landmarks
     # --------------------------------------------------------
 
-    visible_points = [
-        point
-        for point in landmarks
-        if getattr(point, "visibility", 0.0) > 0.25
-    ]
+    visible_points = []
 
-    if len(visible_points) < 6:
+    for point in landmarks:
+
+        if not landmark_coordinates_are_valid(
+            point
+        ):
+            continue
+
+        visibility = (
+            get_landmark_visibility(
+                point
+            )
+        )
+
+        if visibility > 0.25:
+            visible_points.append(
+                point
+            )
+
+    if len(
+        visible_points
+    ) < 6:
         return None
 
     # --------------------------------------------------------
@@ -146,12 +329,12 @@ def calculate_features(
     # --------------------------------------------------------
 
     xs = [
-        point.x
+        float(point.x)
         for point in visible_points
     ]
 
     ys = [
-        point.y
+        float(point.y)
         for point in visible_points
     ]
 
@@ -161,32 +344,49 @@ def calculate_features(
     min_y = min(ys)
     max_y = max(ys)
 
-    bbox_w = max_x - min_x
-    bbox_h = max_y - min_y
+    bbox_w = (
+        max_x
+        -
+        min_x
+    )
 
-    if bbox_w <= 1e-6 or bbox_h <= 1e-6:
+    bbox_h = (
+        max_y
+        -
+        min_y
+    )
+
+    if (
+        bbox_w <= 1e-6
+        or
+        bbox_h <= 1e-6
+    ):
         return None
 
     # --------------------------------------------------------
     # Aspect ratio
     # --------------------------------------------------------
 
-    aspect_ratio = bbox_w / bbox_h
+    aspect_ratio = (
+        bbox_w
+        /
+        bbox_h
+    )
 
     # --------------------------------------------------------
     # Shoulder midpoint
     # --------------------------------------------------------
 
     shoulder_x = (
-        left_shoulder.x
+        float(left_shoulder.x)
         +
-        right_shoulder.x
+        float(right_shoulder.x)
     ) / 2.0
 
     shoulder_y = (
-        left_shoulder.y
+        float(left_shoulder.y)
         +
-        right_shoulder.y
+        float(right_shoulder.y)
     ) / 2.0
 
     # --------------------------------------------------------
@@ -194,15 +394,15 @@ def calculate_features(
     # --------------------------------------------------------
 
     hip_x = (
-        left_hip.x
+        float(left_hip.x)
         +
-        right_hip.x
+        float(right_hip.x)
     ) / 2.0
 
     hip_y_raw = (
-        left_hip.y
+        float(left_hip.y)
         +
-        right_hip.y
+        float(right_hip.y)
     ) / 2.0
 
     # --------------------------------------------------------
@@ -232,14 +432,19 @@ def calculate_features(
         )
     )
 
-    torso_angle = np.clip(
-        torso_angle,
-        0,
-        90
+    torso_angle = float(
+        np.clip(
+            torso_angle,
+            0,
+            90
+        )
     )
 
     # --------------------------------------------------------
     # Normalized hip Y
+    #
+    # IMPORTANT:
+    # Keep identical to training.
     # --------------------------------------------------------
 
     hip_y = (
@@ -266,6 +471,10 @@ def calculate_features(
 
     # --------------------------------------------------------
     # Motion features
+    #
+    # IMPORTANT:
+    # Keep the existing definition because the Random Forest
+    # was trained using this feature representation.
     # --------------------------------------------------------
 
     v_hip_y = 0.0
@@ -277,68 +486,94 @@ def calculate_features(
         len(previous_landmarks) >= 25
     ):
 
-        prev_hip_y = (
-            previous_landmarks[23].y
-            +
-            previous_landmarks[24].y
-        ) / 2.0
+        previous_important_points = [
+            previous_landmarks[11],
+            previous_landmarks[12],
+            previous_landmarks[23],
+            previous_landmarks[24]
+        ]
 
-        prev_shoulder_x = (
-            previous_landmarks[11].x
-            +
-            previous_landmarks[12].x
-        ) / 2.0
+        if all(
+            landmark_coordinates_are_valid(point)
+            for point in previous_important_points
+        ):
 
-        prev_shoulder_y = (
-            previous_landmarks[11].y
-            +
-            previous_landmarks[12].y
-        ) / 2.0
+            prev_hip_y = (
+                float(previous_landmarks[23].y)
+                +
+                float(previous_landmarks[24].y)
+            ) / 2.0
 
-        prev_hip_x = (
-            previous_landmarks[23].x
-            +
-            previous_landmarks[24].x
-        ) / 2.0
+            prev_shoulder_x = (
+                float(previous_landmarks[11].x)
+                +
+                float(previous_landmarks[12].x)
+            ) / 2.0
 
-        prev_torso_dx = (
-            prev_hip_x
-            -
-            prev_shoulder_x
-        )
+            prev_shoulder_y = (
+                float(previous_landmarks[11].y)
+                +
+                float(previous_landmarks[12].y)
+            ) / 2.0
 
-        prev_torso_dy = (
-            prev_hip_y
-            -
-            prev_shoulder_y
-        )
+            prev_hip_x = (
+                float(previous_landmarks[23].x)
+                +
+                float(previous_landmarks[24].x)
+            ) / 2.0
 
-        prev_angle = math.degrees(
-            math.atan2(
-                abs(prev_torso_dy),
-                abs(prev_torso_dx) + 1e-6
+            prev_torso_dx = (
+                prev_hip_x
+                -
+                prev_shoulder_x
             )
-        )
 
-        prev_angle = np.clip(
-            prev_angle,
-            0,
-            90
-        )
+            prev_torso_dy = (
+                prev_hip_y
+                -
+                prev_shoulder_y
+            )
 
-        # Downward hip movement
-        v_hip_y = (
-            hip_y_raw
-            -
-            prev_hip_y
-        )
+            prev_angle = math.degrees(
+                math.atan2(
+                    abs(prev_torso_dy),
+                    abs(prev_torso_dx) + 1e-6
+                )
+            )
 
-        # Torso angular movement
-        v_torso_angle = (
-            torso_angle
-            -
-            prev_angle
-        )
+            prev_angle = float(
+                np.clip(
+                    prev_angle,
+                    0,
+                    90
+                )
+            )
+
+            # ------------------------------------------------
+            # Existing training definition:
+            # frame-to-frame downward hip displacement
+            # ------------------------------------------------
+
+            v_hip_y = (
+                hip_y_raw
+                -
+                prev_hip_y
+            )
+
+            # ------------------------------------------------
+            # Existing training definition:
+            # frame-to-frame torso angle change
+            # ------------------------------------------------
+
+            v_torso_angle = (
+                torso_angle
+                -
+                prev_angle
+            )
+
+    # --------------------------------------------------------
+    # Return exactly the 8 base features
+    # --------------------------------------------------------
 
     return {
 
@@ -371,7 +606,8 @@ def calculate_features(
 # ============================================================
 # TEMPORAL FEATURES
 #
-# Same rolling system as train_model.py
+# IMPORTANT:
+# Same rolling system as training.
 # ============================================================
 
 def add_temporal_features(
@@ -379,7 +615,10 @@ def add_temporal_features(
     window_size=10
 ):
 
-    df_video = df_video.copy()
+    df_video = (
+        df_video
+        .copy()
+    )
 
     df_video = (
         df_video
@@ -387,9 +626,16 @@ def add_temporal_features(
         .reset_index(drop=True)
     )
 
-    # Maximum downward hip velocity
-    df_video["rolling_max_v_hip"] = (
-        df_video["v_hip_y"]
+    # --------------------------------------------------------
+    # Maximum downward hip movement
+    # --------------------------------------------------------
+
+    df_video[
+        "rolling_max_v_hip"
+    ] = (
+        df_video[
+            "v_hip_y"
+        ]
         .rolling(
             window=window_size,
             min_periods=1
@@ -397,9 +643,16 @@ def add_temporal_features(
         .max()
     )
 
+    # --------------------------------------------------------
     # Mean torso angle
-    df_video["rolling_mean_angle"] = (
-        df_video["torso_angle"]
+    # --------------------------------------------------------
+
+    df_video[
+        "rolling_mean_angle"
+    ] = (
+        df_video[
+            "torso_angle"
+        ]
         .rolling(
             window=window_size,
             min_periods=1
@@ -407,9 +660,16 @@ def add_temporal_features(
         .mean()
     )
 
+    # --------------------------------------------------------
     # Maximum body aspect ratio
-    df_video["rolling_max_aspect"] = (
-        df_video["aspect_ratio"]
+    # --------------------------------------------------------
+
+    df_video[
+        "rolling_max_aspect"
+    ] = (
+        df_video[
+            "aspect_ratio"
+        ]
         .rolling(
             window=window_size,
             min_periods=1
@@ -417,9 +677,16 @@ def add_temporal_features(
         .max()
     )
 
+    # --------------------------------------------------------
     # Minimum normalized hip position
-    df_video["rolling_min_hip_y"] = (
-        df_video["hip_y"]
+    # --------------------------------------------------------
+
+    df_video[
+        "rolling_min_hip_y"
+    ] = (
+        df_video[
+            "hip_y"
+        ]
         .rolling(
             window=window_size,
             min_periods=1
@@ -427,9 +694,14 @@ def add_temporal_features(
         .min()
     )
 
+    # --------------------------------------------------------
     # Torso angle movement range
+    # --------------------------------------------------------
+
     rolling_max_angle = (
-        df_video["torso_angle"]
+        df_video[
+            "torso_angle"
+        ]
         .rolling(
             window=window_size,
             min_periods=1
@@ -438,7 +710,9 @@ def add_temporal_features(
     )
 
     rolling_min_angle = (
-        df_video["torso_angle"]
+        df_video[
+            "torso_angle"
+        ]
         .rolling(
             window=window_size,
             min_periods=1
@@ -446,7 +720,9 @@ def add_temporal_features(
         .min()
     )
 
-    df_video["angle_change_range"] = (
+    df_video[
+        "angle_change_range"
+    ] = (
         rolling_max_angle
         -
         rolling_min_angle
@@ -464,11 +740,12 @@ def create_alarm_sound():
 
     sample_rate = 44100
 
-    # About 2.4 seconds total
     duration = 2.4
 
     samples = int(
-        sample_rate * duration
+        sample_rate
+        *
+        duration
     )
 
     t = (
@@ -509,7 +786,9 @@ def create_alarm_sound():
         waveform
         *
         32767
-    ).astype(np.int16)
+    ).astype(
+        np.int16
+    )
 
     buffer = io.BytesIO()
 
@@ -518,9 +797,13 @@ def create_alarm_sound():
         "wb"
     ) as wav_file:
 
-        wav_file.setnchannels(1)
+        wav_file.setnchannels(
+            1
+        )
 
-        wav_file.setsampwidth(2)
+        wav_file.setsampwidth(
+            2
+        )
 
         wav_file.setframerate(
             sample_rate
@@ -582,7 +865,9 @@ def get_video_frame(
         )
     )
 
-    success, frame = capture.read()
+    success, frame = (
+        capture.read()
+    )
 
     capture.release()
 
@@ -602,9 +887,13 @@ def create_result_frame(
     detected
 ):
 
-    result_frame = frame.copy()
+    result_frame = (
+        frame.copy()
+    )
 
-    height, width = result_frame.shape[:2]
+    height, width = (
+        result_frame.shape[:2]
+    )
 
     if detected:
 
@@ -632,7 +921,10 @@ def create_result_frame(
             0
         )
 
+    # --------------------------------------------------------
     # Dark text background
+    # --------------------------------------------------------
+
     cv2.rectangle(
         result_frame,
         (15, 15),
@@ -674,211 +966,396 @@ def extract_video_features(
     status_box=None
 ):
 
-    detector = create_pose_detector()
+    detector = None
+    capture = None
 
-    capture = cv2.VideoCapture(
-        video_path
-    )
+    try:
 
-    if not capture.isOpened():
-
-        detector.close()
-
-        raise RuntimeError(
-            "OpenCV could not open the uploaded video."
+        detector = (
+            create_pose_detector()
         )
 
-    fps = capture.get(
-        cv2.CAP_PROP_FPS
-    )
-
-    if (
-        fps is None
-        or
-        fps <= 0
-        or
-        not np.isfinite(fps)
-    ):
-        fps = 25.0
-
-    total_frames = int(
-        capture.get(
-            cv2.CAP_PROP_FRAME_COUNT
-        )
-    )
-
-    rows = []
-
-    frame_number = 0
-
-    previous_landmarks = None
-
-    previous_timestamp = -1
-
-    while True:
-
-        success, frame = capture.read()
-
-        if not success:
-            break
-
-        frame_number += 1
-
-        # ----------------------------------------------------
-        # Convert OpenCV BGR → RGB
-        # ----------------------------------------------------
-
-        rgb_frame = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
-
-        # ----------------------------------------------------
-        # MediaPipe timestamp
-        # ----------------------------------------------------
-
-        timestamp_ms = int(
-            (
-                (frame_number - 1)
-                /
-                max(fps, 1e-6)
+        capture = (
+            cv2.VideoCapture(
+                video_path
             )
-            *
-            1000
         )
 
-        # MediaPipe VIDEO mode requires increasing timestamps
-        if timestamp_ms <= previous_timestamp:
+        if not capture.isOpened():
 
-            timestamp_ms = (
+            raise RuntimeError(
+                "OpenCV could not open "
+                "the uploaded video."
+            )
+
+        fps = capture.get(
+            cv2.CAP_PROP_FPS
+        )
+
+        if (
+            fps is None
+            or
+            fps <= 0
+            or
+            not np.isfinite(fps)
+        ):
+            fps = 25.0
+
+        fps = float(
+            fps
+        )
+
+        total_frames = int(
+            capture.get(
+                cv2.CAP_PROP_FRAME_COUNT
+            )
+        )
+
+        rows = []
+
+        frame_number = 0
+
+        previous_landmarks = None
+
+        previous_timestamp = -1
+
+        while True:
+
+            success, frame = (
+                capture.read()
+            )
+
+            if not success:
+                break
+
+            frame_number += 1
+
+            # ------------------------------------------------
+            # Convert OpenCV BGR → RGB
+            # ------------------------------------------------
+
+            rgb_frame = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2RGB
+            )
+
+            # ------------------------------------------------
+            # MediaPipe timestamp
+            # ------------------------------------------------
+
+            timestamp_ms = int(
+                (
+                    (
+                        frame_number - 1
+                    )
+                    /
+                    max(
+                        fps,
+                        1e-6
+                    )
+                )
+                *
+                1000
+            )
+
+            # MediaPipe VIDEO mode requires
+            # monotonically increasing timestamps.
+            if (
+                timestamp_ms
+                <=
                 previous_timestamp
-                +
-                1
-            )
+            ):
 
-        previous_timestamp = timestamp_ms
+                timestamp_ms = (
+                    previous_timestamp
+                    +
+                    1
+                )
 
-        # ----------------------------------------------------
-        # MediaPipe image
-        # ----------------------------------------------------
-
-        mp_image = mp.Image(
-            image_format=mp.ImageFormat.SRGB,
-            data=rgb_frame
-        )
-
-        try:
-
-            result = detector.detect_for_video(
-                mp_image,
+            previous_timestamp = (
                 timestamp_ms
             )
 
-        except Exception:
+            # ------------------------------------------------
+            # MediaPipe image
+            # ------------------------------------------------
 
-            previous_landmarks = None
-
-            continue
-
-        # ----------------------------------------------------
-        # No human pose found
-        # ----------------------------------------------------
-
-        if not result.pose_landmarks:
-
-            previous_landmarks = None
-
-        else:
-
-            landmarks = (
-                result.pose_landmarks[0]
+            mp_image = mp.Image(
+                image_format=(
+                    mp.ImageFormat.SRGB
+                ),
+                data=rgb_frame
             )
 
-            features = calculate_features(
-                landmarks,
-                previous_landmarks
-            )
+            try:
 
-            previous_landmarks = landmarks
+                result = (
+                    detector.detect_for_video(
+                        mp_image,
+                        timestamp_ms
+                    )
+                )
 
-            if features is not None:
+            except Exception:
 
-                row = features.copy()
+                # A failed MediaPipe frame must not become
+                # the reference for the next valid frame.
+                previous_landmarks = None
 
-                row["frame"] = (
+                continue
+
+            # ------------------------------------------------
+            # No human pose found
+            # ------------------------------------------------
+
+            if not result.pose_landmarks:
+
+                previous_landmarks = None
+
+            else:
+
+                landmarks = (
+                    result.pose_landmarks[0]
+                )
+
+                features = (
+                    calculate_features(
+                        landmarks,
+                        previous_landmarks
+                    )
+                )
+
+                # ------------------------------------------------
+                # IMPORTANT:
+                #
+                # Only update previous_landmarks when the
+                # current pose produced usable features.
+                # This prevents a bad pose from becoming the
+                # reference for the next frame.
+                # ------------------------------------------------
+
+                if features is not None:
+
+                    previous_landmarks = (
+                        landmarks
+                    )
+
+                    row = (
+                        features.copy()
+                    )
+
+                    row["frame"] = (
+                        frame_number
+                    )
+
+                    rows.append(
+                        row
+                    )
+
+                # If the current pose is unusable, do NOT
+                # replace previous_landmarks.
+
+            # ------------------------------------------------
+            # Streamlit progress
+            # ------------------------------------------------
+
+            if (
+                progress_bar is not None
+                and
+                total_frames > 0
+                and
+                frame_number % 5 == 0
+            ):
+
+                progress = min(
                     frame_number
+                    /
+                    total_frames,
+                    1.0
                 )
 
-                rows.append(
-                    row
+                progress_bar.progress(
+                    progress
                 )
 
-        # ----------------------------------------------------
-        # Streamlit progress
-        # ----------------------------------------------------
+            if (
+                status_box is not None
+                and
+                frame_number % 20 == 0
+            ):
 
-        if (
-            progress_bar is not None
-            and
-            total_frames > 0
-            and
-            frame_number % 5 == 0
-        ):
+                status_box.write(
+                    f"Processing frame "
+                    f"{frame_number:,}"
+                    +
+                    (
+                        f" / {total_frames:,}"
+                        if total_frames > 0
+                        else ""
+                    )
+                )
 
-            progress = min(
-                frame_number
-                /
-                total_frames,
+        if progress_bar is not None:
+
+            progress_bar.progress(
                 1.0
             )
 
-            progress_bar.progress(
-                progress
+        if not rows:
+
+            raise RuntimeError(
+                "No usable human pose could be "
+                "detected in this video."
             )
 
-        if (
-            status_box is not None
-            and
-            frame_number % 20 == 0
-        ):
-
-            status_box.write(
-                f"Processing frame "
-                f"{frame_number:,}"
-                +
-                (
-                    f" / {total_frames:,}"
-                    if total_frames > 0
-                    else ""
-                )
-            )
-
-    capture.release()
-
-    detector.close()
-
-    if progress_bar is not None:
-
-        progress_bar.progress(
-            1.0
+        df = pd.DataFrame(
+            rows
         )
 
-    if not rows:
-
-        raise RuntimeError(
-            "No usable human pose could be detected "
-            "in this video."
+        return (
+            df,
+            fps,
+            total_frames
         )
 
-    df = pd.DataFrame(
-        rows
+    finally:
+
+        if capture is not None:
+
+            try:
+                capture.release()
+            except Exception:
+                pass
+
+        if detector is not None:
+
+            try:
+                detector.close()
+            except Exception:
+                pass
+
+
+# ============================================================
+# VALIDATE MODEL FEATURES
+# ============================================================
+
+def validate_model_features(
+    feature_columns
+):
+
+    if not isinstance(
+        feature_columns,
+        (list, tuple)
+    ):
+
+        raise TypeError(
+            "The model's feature_columns must "
+            "be a list or tuple."
+        )
+
+    feature_columns = list(
+        feature_columns
     )
 
-    return (
-        df,
-        fps,
-        total_frames
+    if len(
+        feature_columns
+    ) != EXPECTED_FEATURE_COUNT:
+
+        raise ValueError(
+            "Model feature count mismatch.\n\n"
+            f"Expected: {EXPECTED_FEATURE_COUNT}\n"
+            f"Found: {len(feature_columns)}\n\n"
+            "The model and inference pipeline "
+            "must use the same features."
+        )
+
+    expected_features = (
+        EXPECTED_BASE_FEATURES
+        +
+        EXPECTED_TEMPORAL_FEATURES
     )
+
+    missing = [
+        feature
+        for feature in expected_features
+        if feature not in feature_columns
+    ]
+
+    unexpected = [
+        feature
+        for feature in feature_columns
+        if feature not in expected_features
+    ]
+
+    if missing or unexpected:
+
+        raise ValueError(
+            "Model feature definitions do not match "
+            "the SafeFall inference pipeline.\n\n"
+            f"Missing features: {missing}\n"
+            f"Unexpected features: {unexpected}"
+        )
+
+    return feature_columns
+
+
+# ============================================================
+# DETERMINE FALL CLASS
+# ============================================================
+
+def get_fall_class(
+    model,
+    labels
+):
+
+    # --------------------------------------------------------
+    # Prefer the actual Random Forest class 1.
+    # --------------------------------------------------------
+
+    model_classes = list(
+        getattr(
+            model,
+            "classes_",
+            []
+        )
+    )
+
+    if 1 in model_classes:
+
+        return 1
+
+    # --------------------------------------------------------
+    # Try integer-like labels.
+    # --------------------------------------------------------
+
+    if labels is not None:
+
+        try:
+
+            for label in labels:
+
+                try:
+
+                    if int(label) == 1:
+
+                        return label
+
+                except (
+                    TypeError,
+                    ValueError
+                ):
+
+                    continue
+
+        except TypeError:
+
+            pass
+
+    # --------------------------------------------------------
+    # Fall back to the conventional binary mapping.
+    # --------------------------------------------------------
+
+    return 1
 
 
 # ============================================================
@@ -889,16 +1366,33 @@ def run_predictions(
     df,
     model,
     feature_columns,
-    window_size
+    window_size,
+    labels=None
 ):
 
-    # Same 10-frame temporal calculations as training
+    # --------------------------------------------------------
+    # Validate feature configuration
+    # --------------------------------------------------------
+
+    feature_columns = (
+        validate_model_features(
+            feature_columns
+        )
+    )
+
+    # --------------------------------------------------------
+    # Same temporal calculations as training
+    # --------------------------------------------------------
+
     df = add_temporal_features(
         df,
         window_size=window_size
     )
 
+    # --------------------------------------------------------
     # Remove invalid numerical values
+    # --------------------------------------------------------
+
     df = df.replace(
         [
             np.inf,
@@ -918,6 +1412,23 @@ def run_predictions(
             "feature rows remained for prediction."
         )
 
+    # --------------------------------------------------------
+    # Make sure all required features exist
+    # --------------------------------------------------------
+
+    missing_columns = [
+        column
+        for column in feature_columns
+        if column not in df.columns
+    ]
+
+    if missing_columns:
+
+        raise KeyError(
+            "Missing model features during prediction: "
+            f"{missing_columns}"
+        )
+
     X = df[
         feature_columns
     ].copy()
@@ -926,17 +1437,24 @@ def run_predictions(
     # Class predictions
     # --------------------------------------------------------
 
-    predictions = model.predict(
-        X
+    predictions = (
+        model.predict(X)
     )
 
     df["prediction"] = (
-        predictions.astype(int)
+        predictions
     )
 
     # --------------------------------------------------------
     # FALL probability
     # --------------------------------------------------------
+
+    fall_class = (
+        get_fall_class(
+            model,
+            labels
+        )
+    )
 
     if hasattr(
         model,
@@ -953,13 +1471,32 @@ def run_predictions(
             model.classes_
         )
 
-        if 1 in model_classes:
+        if fall_class in model_classes:
+
+            fall_class_index = (
+                model_classes.index(
+                    fall_class
+                )
+            )
+
+            df[
+                "fall_probability"
+            ] = (
+                probabilities[
+                    :,
+                    fall_class_index
+                ]
+            )
+
+        elif 1 in model_classes:
 
             fall_class_index = (
                 model_classes.index(1)
             )
 
-            df["fall_probability"] = (
+            df[
+                "fall_probability"
+            ] = (
                 probabilities[
                     :,
                     fall_class_index
@@ -968,16 +1505,70 @@ def run_predictions(
 
         else:
 
-            df["fall_probability"] = (
-                df["prediction"]
-                .astype(float)
+            # If the model does not expose class 1,
+            # use its predicted class as the fallback.
+            df[
+                "fall_probability"
+            ] = (
+                np.asarray(
+                    predictions
+                )
+                ==
+                fall_class
+            ).astype(
+                float
             )
 
     else:
 
-        df["fall_probability"] = (
-            df["prediction"]
-            .astype(float)
+        df[
+            "fall_probability"
+        ] = (
+            np.asarray(
+                predictions
+            )
+            ==
+            fall_class
+        ).astype(
+            float
+        )
+
+    # --------------------------------------------------------
+    # Ensure probability is numeric and bounded.
+    # --------------------------------------------------------
+
+    df[
+        "fall_probability"
+    ] = pd.to_numeric(
+        df[
+            "fall_probability"
+        ],
+        errors="coerce"
+    )
+
+    df[
+        "fall_probability"
+    ] = (
+        df[
+            "fall_probability"
+        ]
+        .clip(
+            0.0,
+            1.0
+        )
+    )
+
+    df = df.dropna(
+        subset=[
+            "fall_probability"
+        ]
+    )
+
+    if df.empty:
+
+        raise RuntimeError(
+            "The model produced no valid fall "
+            "probability values."
         )
 
     return df
@@ -986,37 +1577,115 @@ def run_predictions(
 # ============================================================
 # CONFIRM FALL
 #
-# A single noisy frame should not trigger the siren.
-# Require multiple high-risk frames.
+# Require high-risk frames to occur close together.
+#
+# IMPORTANT:
+# This changes ONLY the final decision logic.
+# It does not change the trained features.
 # ============================================================
 
 def confirm_fall(
     prediction_df,
     threshold=0.50,
-    minimum_frames=2
+    minimum_frames=2,
+    max_frame_gap=2
 ):
 
-    risky = (
-        prediction_df[
-            "fall_probability"
-        ]
-        >=
-        threshold
+    if prediction_df.empty:
+
+        return (
+            False,
+            0
+        )
+
+    df = (
+        prediction_df
+        .sort_values("frame")
+        .reset_index(drop=True)
     )
 
-    risk_count = int(
-        risky.sum()
+    risky_frames = (
+        df[
+            df[
+                "fall_probability"
+            ]
+            >=
+            threshold
+        ][
+            "frame"
+        ]
+        .astype(int)
+        .tolist()
     )
+
+    if not risky_frames:
+
+        return (
+            False,
+            0
+        )
+
+    # --------------------------------------------------------
+    # Single-frame confirmation
+    # --------------------------------------------------------
+
+    if minimum_frames <= 1:
+
+        return (
+            True,
+            len(risky_frames)
+        )
+
+    # --------------------------------------------------------
+    # Find the longest cluster of risky frames.
+    #
+    # max_frame_gap=2 means:
+    #
+    # frame 100
+    # frame 101
+    # frame 102
+    #
+    # is one cluster.
+    #
+    # A larger gap breaks the cluster.
+    # --------------------------------------------------------
+
+    longest_cluster = 1
+    current_cluster = 1
+
+    for index in range(
+        1,
+        len(risky_frames)
+    ):
+
+        frame_gap = (
+            risky_frames[index]
+            -
+            risky_frames[index - 1]
+        )
+
+        if frame_gap <= max_frame_gap:
+
+            current_cluster += 1
+
+        else:
+
+            current_cluster = 1
+
+        longest_cluster = max(
+            longest_cluster,
+            current_cluster
+        )
 
     detected = (
-        risk_count
+        longest_cluster
         >=
         minimum_frames
     )
 
     return (
         detected,
-        risk_count
+        longest_cluster
     )
 
 
@@ -1031,7 +1700,9 @@ try:
     )
 
     model = (
-        model_package["model"]
+        model_package[
+            "model"
+        ]
     )
 
     feature_columns = (
@@ -1056,6 +1727,14 @@ try:
         model_package.get(
             "window_size",
             10
+        )
+    )
+
+    # Validate immediately so a broken model package
+    # is caught before video analysis.
+    feature_columns = (
+        validate_model_features(
+            feature_columns
         )
     )
 
@@ -1213,8 +1892,20 @@ with st.expander(
         value=2,
         step=1,
         help=(
-            "Requiring multiple high-risk frames "
-            "helps reduce accidental false alarms."
+            "The required number of nearby high-risk "
+            "frames helps reduce accidental false alarms."
+        )
+    )
+
+    max_frame_gap = st.slider(
+        "Maximum frame gap between high-risk frames",
+        min_value=1,
+        max_value=5,
+        value=2,
+        step=1,
+        help=(
+            "High-risk frames separated by more than "
+            "this many video frames start a new risk cluster."
         )
     )
 
@@ -1313,7 +2004,8 @@ if uploaded_video is not None:
                     feature_df,
                     model,
                     feature_columns,
-                    window_size
+                    window_size,
+                    labels
                 )
 
             status_box.success(
@@ -1330,8 +2022,10 @@ if uploaded_video is not None:
             ) = confirm_fall(
                 prediction_df,
                 threshold=fall_threshold,
-                minimum_frames=
+                minimum_frames=(
                     minimum_fall_frames
+                ),
+                max_frame_gap=max_frame_gap
             )
 
             # ------------------------------------------------
@@ -1414,8 +2108,8 @@ if uploaded_video is not None:
 
                 st.write(
                     "SafeFall AI did not detect enough "
-                    "high-risk fall frames to activate "
-                    "the emergency alarm."
+                    "nearby high-risk fall frames to "
+                    "activate the emergency alarm."
                 )
 
             # ------------------------------------------------
@@ -1506,7 +2200,9 @@ if uploaded_video is not None:
                 .copy()
             )
 
-            chart_df["Fall probability (%)"] = (
+            chart_df[
+                "Fall probability (%)"
+            ] = (
                 chart_df[
                     "fall_probability"
                 ]
@@ -1558,17 +2254,41 @@ if uploaded_video is not None:
                     100
                 ).round(2)
 
+                # ------------------------------------------------
+                # Display predictions safely.
+                # The actual prediction remains unchanged.
+                # ------------------------------------------------
+
+                def display_prediction(
+                    prediction
+                ):
+
+                    try:
+
+                        if int(prediction) == 1:
+                            return "FALL"
+
+                        if int(prediction) == 0:
+                            return "NOT_FALL"
+
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+                        pass
+
+                    return str(
+                        prediction
+                    )
+
                 display_df[
                     "prediction"
                 ] = (
                     display_df[
                         "prediction"
                     ]
-                    .map(
-                        {
-                            0: "NOT_FALL",
-                            1: "FALL"
-                        }
+                    .apply(
+                        display_prediction
                     )
                 )
 
@@ -1608,7 +2328,9 @@ if uploaded_video is not None:
             st.download_button(
                 label="⬇️ Download Detection Results",
                 data=csv_data,
-                file_name="safefall_detection_results.csv",
+                file_name=(
+                    "safefall_detection_results.csv"
+                ),
                 mime="text/csv",
                 use_container_width=True
             )
@@ -1645,12 +2367,14 @@ if uploaded_video is not None:
             with summary_col2:
 
                 st.write(
-                    f"**Average fall risk:** "
+                    f"**Average model-estimated "
+                    f"fall probability:** "
                     f"{average_probability * 100:.2f}%"
                 )
 
                 st.write(
-                    f"**Maximum fall risk:** "
+                    f"**Maximum model-estimated "
+                    f"fall probability:** "
                     f"{max_probability * 100:.2f}%"
                 )
 
