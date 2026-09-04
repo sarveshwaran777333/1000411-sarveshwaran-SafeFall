@@ -14,22 +14,11 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
-
-# ============================================================
-# SAFEFALL AI
-# AI-BASED VIDEO FALL DETECTION SYSTEM
-# ============================================================
-
 st.set_page_config(
     page_title="SafeFall AI",
     page_icon="🛡️",
     layout="wide"
 )
-
-
-# ============================================================
-# PATHS
-# ============================================================
 
 PROJECT_ROOT = os.path.dirname(
     os.path.abspath(__file__)
@@ -45,13 +34,6 @@ POSE_MODEL_PATH = os.path.join(
     PROJECT_ROOT,
     "pose_landmarker_full.task"
 )
-
-
-# ============================================================
-# EXPECTED TRAINING FEATURES
-#
-# These MUST remain consistent with train_model.py
-# ============================================================
 
 EXPECTED_BASE_FEATURES = [
     "aspect_ratio",
@@ -77,11 +59,6 @@ EXPECTED_FEATURE_COUNT = (
     +
     len(EXPECTED_TEMPORAL_FEATURES)
 )
-
-
-# ============================================================
-# LOAD TRAINED RANDOM FOREST
-# ============================================================
 
 @st.cache_resource
 def load_model_package():
@@ -116,11 +93,6 @@ def load_model_package():
 
     return package
 
-
-# ============================================================
-# CREATE MEDIAPIPE POSE DETECTOR
-# ============================================================
-
 def create_pose_detector():
 
     if not os.path.exists(POSE_MODEL_PATH):
@@ -145,15 +117,6 @@ def create_pose_detector():
     return vision.PoseLandmarker.create_from_options(
         options
     )
-
-
-# ============================================================
-# SAFE LANDMARK VISIBILITY
-#
-# MediaPipe Tasks landmark objects normally provide visibility.
-# This helper also handles versions where the attribute may be
-# absent or invalid.
-# ============================================================
 
 def get_landmark_visibility(point):
 
@@ -194,11 +157,6 @@ def get_landmark_visibility(point):
     ):
         return 0.0
 
-
-# ============================================================
-# SAFE LANDMARK COORDINATES
-# ============================================================
-
 def landmark_coordinates_are_valid(
     point
 ):
@@ -230,14 +188,6 @@ def landmark_coordinates_are_valid(
 
         return False
 
-
-# ============================================================
-# BASE POSE FEATURES
-#
-# IMPORTANT:
-# This keeps the same 8 base features used during training.
-# ============================================================
-
 def calculate_features(
     landmarks,
     previous_landmarks=None
@@ -249,10 +199,6 @@ def calculate_features(
         len(landmarks) < 25
     ):
         return None
-
-    # --------------------------------------------------------
-    # Important body joints
-    # --------------------------------------------------------
 
     left_shoulder = landmarks[11]
     right_shoulder = landmarks[12]
@@ -267,23 +213,11 @@ def calculate_features(
         right_hip
     ]
 
-    # --------------------------------------------------------
-    # Validate important landmark coordinates
-    # --------------------------------------------------------
-
     if not all(
         landmark_coordinates_are_valid(point)
         for point in important_points
     ):
         return None
-
-    # --------------------------------------------------------
-    # Visibility check
-    #
-    # MediaPipe Tasks NormalizedLandmark normally exposes
-    # visibility. The helper prevents a missing/invalid field
-    # from crashing the pipeline.
-    # --------------------------------------------------------
 
     important_visibility = [
         get_landmark_visibility(point)
@@ -294,10 +228,6 @@ def calculate_features(
         important_visibility
     ) < 0.25:
         return None
-
-    # --------------------------------------------------------
-    # Visible pose landmarks
-    # --------------------------------------------------------
 
     visible_points = []
 
@@ -323,10 +253,6 @@ def calculate_features(
         visible_points
     ) < 6:
         return None
-
-    # --------------------------------------------------------
-    # Bounding box
-    # --------------------------------------------------------
 
     xs = [
         float(point.x)
@@ -363,19 +289,11 @@ def calculate_features(
     ):
         return None
 
-    # --------------------------------------------------------
-    # Aspect ratio
-    # --------------------------------------------------------
-
     aspect_ratio = (
         bbox_w
         /
         bbox_h
     )
-
-    # --------------------------------------------------------
-    # Shoulder midpoint
-    # --------------------------------------------------------
 
     shoulder_x = (
         float(left_shoulder.x)
@@ -389,10 +307,6 @@ def calculate_features(
         float(right_shoulder.y)
     ) / 2.0
 
-    # --------------------------------------------------------
-    # Hip midpoint
-    # --------------------------------------------------------
-
     hip_x = (
         float(left_hip.x)
         +
@@ -405,10 +319,6 @@ def calculate_features(
         float(right_hip.y)
     ) / 2.0
 
-    # --------------------------------------------------------
-    # Torso vector
-    # --------------------------------------------------------
-
     torso_dx = (
         hip_x
         -
@@ -420,10 +330,6 @@ def calculate_features(
         -
         shoulder_y
     )
-
-    # --------------------------------------------------------
-    # Torso angle
-    # --------------------------------------------------------
 
     torso_angle = math.degrees(
         math.atan2(
@@ -440,22 +346,11 @@ def calculate_features(
         )
     )
 
-    # --------------------------------------------------------
-    # Normalized hip Y
-    #
-    # IMPORTANT:
-    # Keep identical to training.
-    # --------------------------------------------------------
-
     hip_y = (
         hip_y_raw
         -
         min_y
     ) / bbox_h
-
-    # --------------------------------------------------------
-    # Torso length ratio
-    # --------------------------------------------------------
 
     torso_length = math.sqrt(
         torso_dx ** 2
@@ -468,14 +363,6 @@ def calculate_features(
         /
         bbox_h
     )
-
-    # --------------------------------------------------------
-    # Motion features
-    #
-    # IMPORTANT:
-    # Keep the existing definition because the Random Forest
-    # was trained using this feature representation.
-    # --------------------------------------------------------
 
     v_hip_y = 0.0
     v_torso_angle = 0.0
@@ -549,21 +436,11 @@ def calculate_features(
                 )
             )
 
-            # ------------------------------------------------
-            # Existing training definition:
-            # frame-to-frame downward hip displacement
-            # ------------------------------------------------
-
             v_hip_y = (
                 hip_y_raw
                 -
                 prev_hip_y
             )
-
-            # ------------------------------------------------
-            # Existing training definition:
-            # frame-to-frame torso angle change
-            # ------------------------------------------------
 
             v_torso_angle = (
                 torso_angle
@@ -571,12 +448,7 @@ def calculate_features(
                 prev_angle
             )
 
-    # --------------------------------------------------------
-    # Return exactly the 8 base features
-    # --------------------------------------------------------
-
     return {
-
         "aspect_ratio":
             float(aspect_ratio),
 
@@ -602,14 +474,6 @@ def calculate_features(
             float(v_torso_angle)
     }
 
-
-# ============================================================
-# TEMPORAL FEATURES
-#
-# IMPORTANT:
-# Same rolling system as training.
-# ============================================================
-
 def add_temporal_features(
     df_video,
     window_size=10
@@ -626,10 +490,6 @@ def add_temporal_features(
         .reset_index(drop=True)
     )
 
-    # --------------------------------------------------------
-    # Maximum downward hip movement
-    # --------------------------------------------------------
-
     df_video[
         "rolling_max_v_hip"
     ] = (
@@ -642,10 +502,6 @@ def add_temporal_features(
         )
         .max()
     )
-
-    # --------------------------------------------------------
-    # Mean torso angle
-    # --------------------------------------------------------
 
     df_video[
         "rolling_mean_angle"
@@ -660,10 +516,6 @@ def add_temporal_features(
         .mean()
     )
 
-    # --------------------------------------------------------
-    # Maximum body aspect ratio
-    # --------------------------------------------------------
-
     df_video[
         "rolling_max_aspect"
     ] = (
@@ -677,10 +529,6 @@ def add_temporal_features(
         .max()
     )
 
-    # --------------------------------------------------------
-    # Minimum normalized hip position
-    # --------------------------------------------------------
-
     df_video[
         "rolling_min_hip_y"
     ] = (
@@ -693,10 +541,6 @@ def add_temporal_features(
         )
         .min()
     )
-
-    # --------------------------------------------------------
-    # Torso angle movement range
-    # --------------------------------------------------------
 
     rolling_max_angle = (
         df_video[
@@ -730,11 +574,6 @@ def add_temporal_features(
 
     return df_video
 
-
-# ============================================================
-# CREATE ALARM SOUND
-# ============================================================
-
 @st.cache_data
 def create_alarm_sound():
 
@@ -754,7 +593,6 @@ def create_alarm_sound():
         sample_rate
     )
 
-    # Alternating warning frequencies
     frequency = np.where(
         (t % 0.60) < 0.30,
         880.0,
@@ -775,7 +613,6 @@ def create_alarm_sound():
         )
     )
 
-    # Create pulsing alarm
     pulse = (
         (t % 0.60) < 0.48
     ).astype(float)
@@ -815,11 +652,6 @@ def create_alarm_sound():
 
     return buffer.getvalue()
 
-
-# ============================================================
-# PLAY FALL ALARM
-# ============================================================
-
 def play_fall_alarm():
 
     alarm = create_alarm_sound()
@@ -834,16 +666,10 @@ def play_fall_alarm():
 
     except TypeError:
 
-        # Compatibility fallback
         st.audio(
             alarm,
             format="audio/wav"
         )
-
-
-# ============================================================
-# READ ONE VIDEO FRAME
-# ============================================================
 
 def get_video_frame(
     video_path,
@@ -875,11 +701,6 @@ def get_video_frame(
         return None
 
     return frame
-
-
-# ============================================================
-# DRAW RESULT ON HIGH-RISK FRAME
-# ============================================================
 
 def create_result_frame(
     frame,
@@ -921,10 +742,6 @@ def create_result_frame(
             0
         )
 
-    # --------------------------------------------------------
-    # Dark text background
-    # --------------------------------------------------------
-
     cv2.rectangle(
         result_frame,
         (15, 15),
@@ -954,11 +771,6 @@ def create_result_frame(
         result_frame,
         cv2.COLOR_BGR2RGB
     )
-
-
-# ============================================================
-# VIDEO FEATURE EXTRACTION
-# ============================================================
 
 def extract_video_features(
     video_path,
@@ -1030,18 +842,10 @@ def extract_video_features(
 
             frame_number += 1
 
-            # ------------------------------------------------
-            # Convert OpenCV BGR → RGB
-            # ------------------------------------------------
-
             rgb_frame = cv2.cvtColor(
                 frame,
                 cv2.COLOR_BGR2RGB
             )
-
-            # ------------------------------------------------
-            # MediaPipe timestamp
-            # ------------------------------------------------
 
             timestamp_ms = int(
                 (
@@ -1058,8 +862,6 @@ def extract_video_features(
                 1000
             )
 
-            # MediaPipe VIDEO mode requires
-            # monotonically increasing timestamps.
             if (
                 timestamp_ms
                 <=
@@ -1075,10 +877,6 @@ def extract_video_features(
             previous_timestamp = (
                 timestamp_ms
             )
-
-            # ------------------------------------------------
-            # MediaPipe image
-            # ------------------------------------------------
 
             mp_image = mp.Image(
                 image_format=(
@@ -1098,15 +896,9 @@ def extract_video_features(
 
             except Exception:
 
-                # A failed MediaPipe frame must not become
-                # the reference for the next valid frame.
                 previous_landmarks = None
 
                 continue
-
-            # ------------------------------------------------
-            # No human pose found
-            # ------------------------------------------------
 
             if not result.pose_landmarks:
 
@@ -1125,15 +917,6 @@ def extract_video_features(
                     )
                 )
 
-                # ------------------------------------------------
-                # IMPORTANT:
-                #
-                # Only update previous_landmarks when the
-                # current pose produced usable features.
-                # This prevents a bad pose from becoming the
-                # reference for the next frame.
-                # ------------------------------------------------
-
                 if features is not None:
 
                     previous_landmarks = (
@@ -1151,13 +934,6 @@ def extract_video_features(
                     rows.append(
                         row
                     )
-
-                # If the current pose is unusable, do NOT
-                # replace previous_landmarks.
-
-            # ------------------------------------------------
-            # Streamlit progress
-            # ------------------------------------------------
 
             if (
                 progress_bar is not None
@@ -1234,11 +1010,6 @@ def extract_video_features(
             except Exception:
                 pass
 
-
-# ============================================================
-# VALIDATE MODEL FEATURES
-# ============================================================
-
 def validate_model_features(
     feature_columns
 ):
@@ -1298,19 +1069,10 @@ def validate_model_features(
 
     return feature_columns
 
-
-# ============================================================
-# DETERMINE FALL CLASS
-# ============================================================
-
 def get_fall_class(
     model,
     labels
 ):
-
-    # --------------------------------------------------------
-    # Prefer the actual Random Forest class 1.
-    # --------------------------------------------------------
 
     model_classes = list(
         getattr(
@@ -1323,10 +1085,6 @@ def get_fall_class(
     if 1 in model_classes:
 
         return 1
-
-    # --------------------------------------------------------
-    # Try integer-like labels.
-    # --------------------------------------------------------
 
     if labels is not None:
 
@@ -1351,16 +1109,7 @@ def get_fall_class(
 
             pass
 
-    # --------------------------------------------------------
-    # Fall back to the conventional binary mapping.
-    # --------------------------------------------------------
-
     return 1
-
-
-# ============================================================
-# RUN RANDOM FOREST
-# ============================================================
 
 def run_predictions(
     df,
@@ -1370,28 +1119,16 @@ def run_predictions(
     labels=None
 ):
 
-    # --------------------------------------------------------
-    # Validate feature configuration
-    # --------------------------------------------------------
-
     feature_columns = (
         validate_model_features(
             feature_columns
         )
     )
 
-    # --------------------------------------------------------
-    # Same temporal calculations as training
-    # --------------------------------------------------------
-
     df = add_temporal_features(
         df,
         window_size=window_size
     )
-
-    # --------------------------------------------------------
-    # Remove invalid numerical values
-    # --------------------------------------------------------
 
     df = df.replace(
         [
@@ -1412,10 +1149,6 @@ def run_predictions(
             "feature rows remained for prediction."
         )
 
-    # --------------------------------------------------------
-    # Make sure all required features exist
-    # --------------------------------------------------------
-
     missing_columns = [
         column
         for column in feature_columns
@@ -1433,10 +1166,6 @@ def run_predictions(
         feature_columns
     ].copy()
 
-    # --------------------------------------------------------
-    # Class predictions
-    # --------------------------------------------------------
-
     predictions = (
         model.predict(X)
     )
@@ -1444,10 +1173,6 @@ def run_predictions(
     df["prediction"] = (
         predictions
     )
-
-    # --------------------------------------------------------
-    # FALL probability
-    # --------------------------------------------------------
 
     fall_class = (
         get_fall_class(
@@ -1505,8 +1230,6 @@ def run_predictions(
 
         else:
 
-            # If the model does not expose class 1,
-            # use its predicted class as the fallback.
             df[
                 "fall_probability"
             ] = (
@@ -1532,10 +1255,6 @@ def run_predictions(
         ).astype(
             float
         )
-
-    # --------------------------------------------------------
-    # Ensure probability is numeric and bounded.
-    # --------------------------------------------------------
 
     df[
         "fall_probability"
@@ -1572,17 +1291,6 @@ def run_predictions(
         )
 
     return df
-
-
-# ============================================================
-# CONFIRM FALL
-#
-# Require high-risk frames to occur close together.
-#
-# IMPORTANT:
-# This changes ONLY the final decision logic.
-# It does not change the trained features.
-# ============================================================
 
 def confirm_fall(
     prediction_df,
@@ -1625,30 +1333,12 @@ def confirm_fall(
             0
         )
 
-    # --------------------------------------------------------
-    # Single-frame confirmation
-    # --------------------------------------------------------
-
     if minimum_frames <= 1:
 
         return (
             True,
             len(risky_frames)
         )
-
-    # --------------------------------------------------------
-    # Find the longest cluster of risky frames.
-    #
-    # max_frame_gap=2 means:
-    #
-    # frame 100
-    # frame 101
-    # frame 102
-    #
-    # is one cluster.
-    #
-    # A larger gap breaks the cluster.
-    # --------------------------------------------------------
 
     longest_cluster = 1
     current_cluster = 1
@@ -1688,11 +1378,6 @@ def confirm_fall(
         longest_cluster
     )
 
-
-# ============================================================
-# LOAD MODEL
-# ============================================================
-
 try:
 
     model_package = (
@@ -1730,8 +1415,6 @@ try:
         )
     )
 
-    # Validate immediately so a broken model package
-    # is caught before video analysis.
     feature_columns = (
         validate_model_features(
             feature_columns
@@ -1751,11 +1434,6 @@ except Exception as error:
 
     st.stop()
 
-
-# ============================================================
-# MAIN INTERFACE
-# ============================================================
-
 st.title(
     "🛡️ SafeFall AI"
 )
@@ -1773,11 +1451,6 @@ st.write(
 st.success(
     "✅ SafeFall AI trained model loaded successfully!"
 )
-
-
-# ============================================================
-# MODEL STATUS
-# ============================================================
 
 st.divider()
 
@@ -1817,11 +1490,6 @@ with col4:
         f"{window_size} frames"
     )
 
-
-# ============================================================
-# FEATURE INFORMATION
-# ============================================================
-
 with st.expander(
     "🔬 View the 13 AI features"
 ):
@@ -1834,11 +1502,6 @@ with st.expander(
         st.write(
             f"{number}. `{feature}`"
         )
-
-
-# ============================================================
-# VIDEO DETECTION
-# ============================================================
 
 st.divider()
 
@@ -1863,11 +1526,6 @@ uploaded_video = st.file_uploader(
         "mpg"
     ]
 )
-
-
-# ============================================================
-# DETECTION SETTINGS
-# ============================================================
 
 with st.expander(
     "⚙️ Detection settings"
@@ -1909,11 +1567,6 @@ with st.expander(
         )
     )
 
-
-# ============================================================
-# VIDEO UPLOADED
-# ============================================================
-
 if uploaded_video is not None:
 
     video_bytes = uploaded_video.getvalue()
@@ -1943,23 +1596,16 @@ if uploaded_video is not None:
 
     if analyse_button:
 
-        # Preserve the original video file extension
         extension = os.path.splitext(
             uploaded_video.name
         )[1].lower()
 
-        # If the uploaded file has no extension,
-        # use AVI because the testing videos are AVI.
         if not extension:
             extension = ".avi"
 
         temporary_path = None
 
         try:
-
-            # ------------------------------------------------
-            # Save uploaded video temporarily
-            # ------------------------------------------------
 
             with tempfile.NamedTemporaryFile(
                 delete=False,
@@ -2012,10 +1658,6 @@ if uploaded_video is not None:
                 "✅ Video analysis complete!"
             )
 
-            # ------------------------------------------------
-            # Fall confirmation
-            # ------------------------------------------------
-
             (
                 fall_detected,
                 high_risk_frames
@@ -2027,10 +1669,6 @@ if uploaded_video is not None:
                 ),
                 max_frame_gap=max_frame_gap
             )
-
-            # ------------------------------------------------
-            # Statistics
-            # ------------------------------------------------
 
             max_probability = float(
                 prediction_df[
@@ -2076,10 +1714,6 @@ if uploaded_video is not None:
                 prediction_df
             )
 
-            # =================================================
-            # FALL DETECTED
-            # =================================================
-
             st.divider()
 
             st.write(
@@ -2097,7 +1731,6 @@ if uploaded_video is not None:
                     "consistent with a fall in the video."
                 )
 
-                # 🔊 PLAY ALARM
                 play_fall_alarm()
 
             else:
@@ -2111,10 +1744,6 @@ if uploaded_video is not None:
                     "nearby high-risk fall frames to "
                     "activate the emergency alarm."
                 )
-
-            # ------------------------------------------------
-            # Result metrics
-            # ------------------------------------------------
 
             result1, result2, result3, result4 = (
                 st.columns(4)
@@ -2148,10 +1777,6 @@ if uploaded_video is not None:
                     f"{highest_risk_time:.2f} s"
                 )
 
-            # ------------------------------------------------
-            # Highest-risk video frame
-            # ------------------------------------------------
-
             st.write(
                 "### 🔎 Highest-Risk Frame"
             )
@@ -2181,10 +1806,6 @@ if uploaded_video is not None:
                     ),
                     use_container_width=True
                 )
-
-            # ------------------------------------------------
-            # Fall probability graph
-            # ------------------------------------------------
 
             st.write(
                 "### 📈 Fall Risk Across the Video"
@@ -2225,10 +1846,6 @@ if uploaded_video is not None:
                 x_label="Video frame"
             )
 
-            # ------------------------------------------------
-            # Detailed analysis
-            # ------------------------------------------------
-
             with st.expander(
                 "📊 View detailed frame predictions"
             ):
@@ -2253,11 +1870,6 @@ if uploaded_video is not None:
                     *
                     100
                 ).round(2)
-
-                # ------------------------------------------------
-                # Display predictions safely.
-                # The actual prediction remains unchanged.
-                # ------------------------------------------------
 
                 def display_prediction(
                     prediction
@@ -2313,10 +1925,6 @@ if uploaded_video is not None:
                     hide_index=True
                 )
 
-            # ------------------------------------------------
-            # Download analysis
-            # ------------------------------------------------
-
             csv_data = (
                 prediction_df
                 .to_csv(
@@ -2334,10 +1942,6 @@ if uploaded_video is not None:
                 mime="text/csv",
                 use_container_width=True
             )
-
-            # ------------------------------------------------
-            # Summary
-            # ------------------------------------------------
 
             st.write(
                 "### 🧠 AI Analysis Summary"
@@ -2420,11 +2024,6 @@ if uploaded_video is not None:
 
                     pass
 
-
-# ============================================================
-# SYSTEM STATUS
-# ============================================================
-
 st.divider()
 
 st.write(
@@ -2462,11 +2061,6 @@ with status4:
         "Interface",
         "Streamlit Cloud"
     )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
 
 st.divider()
 
