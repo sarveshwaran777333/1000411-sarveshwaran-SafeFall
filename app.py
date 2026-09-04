@@ -60,6 +60,7 @@ EXPECTED_FEATURE_COUNT = (
     len(EXPECTED_TEMPORAL_FEATURES)
 )
 
+
 @st.cache_resource
 def load_model_package():
 
@@ -93,6 +94,7 @@ def load_model_package():
 
     return package
 
+
 def create_pose_detector():
 
     if not os.path.exists(POSE_MODEL_PATH):
@@ -118,12 +120,14 @@ def create_pose_detector():
         options
     )
 
+
 def get_landmark_visibility(point):
 
     if point is None:
         return 0.0
 
     try:
+
         visibility = getattr(
             point,
             "visibility",
@@ -155,7 +159,9 @@ def get_landmark_visibility(point):
         ValueError,
         AttributeError
     ):
+
         return 0.0
+
 
 def landmark_coordinates_are_valid(
     point
@@ -188,6 +194,7 @@ def landmark_coordinates_are_valid(
 
         return False
 
+
 def calculate_features(
     landmarks,
     previous_landmarks=None
@@ -198,6 +205,7 @@ def calculate_features(
         or
         len(landmarks) < 25
     ):
+
         return None
 
     left_shoulder = landmarks[11]
@@ -217,6 +225,7 @@ def calculate_features(
         landmark_coordinates_are_valid(point)
         for point in important_points
     ):
+
         return None
 
     important_visibility = [
@@ -227,6 +236,7 @@ def calculate_features(
     if min(
         important_visibility
     ) < 0.25:
+
         return None
 
     visible_points = []
@@ -236,6 +246,7 @@ def calculate_features(
         if not landmark_coordinates_are_valid(
             point
         ):
+
             continue
 
         visibility = (
@@ -245,6 +256,7 @@ def calculate_features(
         )
 
         if visibility > 0.25:
+
             visible_points.append(
                 point
             )
@@ -252,6 +264,7 @@ def calculate_features(
     if len(
         visible_points
     ) < 6:
+
         return None
 
     xs = [
@@ -287,6 +300,7 @@ def calculate_features(
         or
         bbox_h <= 1e-6
     ):
+
         return None
 
     aspect_ratio = (
@@ -474,6 +488,7 @@ def calculate_features(
             float(v_torso_angle)
     }
 
+
 def add_temporal_features(
     df_video,
     window_size=10
@@ -574,6 +589,7 @@ def add_temporal_features(
 
     return df_video
 
+
 @st.cache_data
 def create_alarm_sound():
 
@@ -652,6 +668,7 @@ def create_alarm_sound():
 
     return buffer.getvalue()
 
+
 def play_fall_alarm():
 
     alarm = create_alarm_sound()
@@ -671,6 +688,7 @@ def play_fall_alarm():
             format="audio/wav"
         )
 
+
 def get_video_frame(
     video_path,
     frame_number
@@ -681,6 +699,7 @@ def get_video_frame(
     )
 
     if not capture.isOpened():
+
         return None
 
     capture.set(
@@ -698,14 +717,17 @@ def get_video_frame(
     capture.release()
 
     if not success:
+
         return None
 
     return frame
 
+
 def create_result_frame(
     frame,
     probability,
-    detected
+    detected,
+    label=None
 ):
 
     result_frame = (
@@ -719,7 +741,7 @@ def create_result_frame(
     if detected:
 
         text = (
-            f"FALL DETECTED - "
+            f"FALL EVIDENCE - "
             f"{probability * 100:.1f}%"
         )
 
@@ -731,10 +753,19 @@ def create_result_frame(
 
     else:
 
-        text = (
-            f"NO FALL - "
-            f"{probability * 100:.1f}% risk"
-        )
+        if label is None:
+
+            text = (
+                f"RISK - "
+                f"{probability * 100:.1f}%"
+            )
+
+        else:
+
+            text = (
+                f"{label} - "
+                f"{probability * 100:.1f}%"
+            )
 
         color = (
             0,
@@ -748,9 +779,9 @@ def create_result_frame(
         (
             min(
                 width - 15,
-                650
+                720
             ),
-            85
+            100
         ),
         (0, 0, 0),
         -1
@@ -759,11 +790,22 @@ def create_result_frame(
     cv2.putText(
         result_frame,
         text,
-        (30, 60),
+        (30, 58),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
+        0.9,
         color,
         3,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        result_frame,
+        f"Frame: {getattr(create_result_frame, '_frame_number', '')}",
+        (30, 88),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (255, 255, 255),
+        2,
         cv2.LINE_AA
     )
 
@@ -771,6 +813,117 @@ def create_result_frame(
         result_frame,
         cv2.COLOR_BGR2RGB
     )
+
+
+def create_evidence_frame(
+    frame,
+    frame_number,
+    timestamp,
+    probability,
+    status
+):
+
+    result_frame = (
+        frame.copy()
+    )
+
+    height, width = (
+        result_frame.shape[:2]
+    )
+
+    if status == "FALL EVIDENCE":
+
+        background = (
+            0,
+            0,
+            120
+        )
+
+        text_color = (
+            0,
+            0,
+            255
+        )
+
+    elif status == "HIGH RISK":
+
+        background = (
+            0,
+            100,
+            140
+        )
+
+        text_color = (
+            0,
+            165,
+            255
+        )
+
+    else:
+
+        background = (
+            0,
+            80,
+            0
+        )
+
+        text_color = (
+            0,
+            255,
+            0
+        )
+
+    panel_height = 135
+
+    cv2.rectangle(
+        result_frame,
+        (0, 0),
+        (
+            width,
+            panel_height
+        ),
+        background,
+        -1
+    )
+
+    cv2.putText(
+        result_frame,
+        status,
+        (25, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.95,
+        text_color,
+        3,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        result_frame,
+        f"Frame {frame_number:,}  |  Time {timestamp:.2f}s",
+        (25, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        result_frame,
+        f"AI fall-risk: {probability * 100:.1f}%",
+        (25, 113),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA
+    )
+
+    return cv2.cvtColor(
+        result_frame,
+        cv2.COLOR_BGR2RGB
+    )
+
 
 def extract_video_features(
     video_path,
@@ -811,6 +964,7 @@ def extract_video_features(
             or
             not np.isfinite(fps)
         ):
+
             fps = 25.0
 
         fps = float(
@@ -838,6 +992,7 @@ def extract_video_features(
             )
 
             if not success:
+
                 break
 
             frame_number += 1
@@ -999,16 +1154,23 @@ def extract_video_features(
         if capture is not None:
 
             try:
+
                 capture.release()
+
             except Exception:
+
                 pass
 
         if detector is not None:
 
             try:
+
                 detector.close()
+
             except Exception:
+
                 pass
+
 
 def validate_model_features(
     feature_columns
@@ -1069,6 +1231,7 @@ def validate_model_features(
 
     return feature_columns
 
+
 def get_fall_class(
     model,
     labels
@@ -1110,6 +1273,7 @@ def get_fall_class(
             pass
 
     return 1
+
 
 def run_predictions(
     df,
@@ -1292,7 +1456,8 @@ def run_predictions(
 
     return df
 
-def confirm_fall(
+
+def find_fall_event_cluster(
     prediction_df,
     threshold=0.50,
     minimum_frames=2,
@@ -1301,10 +1466,7 @@ def confirm_fall(
 
     if prediction_df.empty:
 
-        return (
-            False,
-            0
-        )
+        return None
 
     df = (
         prediction_df
@@ -1312,71 +1474,420 @@ def confirm_fall(
         .reset_index(drop=True)
     )
 
-    risky_frames = (
+    risky_df = (
         df[
             df[
                 "fall_probability"
             ]
             >=
             threshold
-        ][
+        ]
+        .copy()
+    )
+
+    if risky_df.empty:
+
+        return None
+
+    clusters = []
+
+    current_cluster = [
+        risky_df.iloc[0]
+    ]
+
+    for index in range(
+        1,
+        len(risky_df)
+    ):
+
+        previous_frame = int(
+            risky_df.iloc[
+                index - 1
+            ]["frame"]
+        )
+
+        current_frame = int(
+            risky_df.iloc[
+                index
+            ]["frame"]
+        )
+
+        frame_gap = (
+            current_frame
+            -
+            previous_frame
+        )
+
+        if frame_gap <= max_frame_gap:
+
+            current_cluster.append(
+                risky_df.iloc[
+                    index
+                ]
+            )
+
+        else:
+
+            clusters.append(
+                current_cluster
+            )
+
+            current_cluster = [
+                risky_df.iloc[
+                    index
+                ]
+            ]
+
+    clusters.append(
+        current_cluster
+    )
+
+    valid_clusters = [
+        cluster
+        for cluster in clusters
+        if len(cluster)
+        >=
+        minimum_frames
+    ]
+
+    if not valid_clusters:
+
+        return None
+
+    valid_clusters.sort(
+        key=lambda cluster: (
+            len(cluster),
+            max(
+                float(row["fall_probability"])
+                for row in cluster
+            )
+        ),
+        reverse=True
+    )
+
+    selected_cluster = (
+        valid_clusters[0]
+    )
+
+    return pd.DataFrame(
+        selected_cluster
+    )
+
+
+def confirm_fall(
+    prediction_df,
+    threshold=0.50,
+    minimum_frames=2,
+    max_frame_gap=2
+):
+
+    event_cluster = (
+        find_fall_event_cluster(
+            prediction_df,
+            threshold,
+            minimum_frames,
+            max_frame_gap
+        )
+    )
+
+    if event_cluster is None:
+
+        return (
+            False,
+            0,
+            None
+        )
+
+    return (
+        True,
+        len(event_cluster),
+        event_cluster
+    )
+
+
+def build_event_timeline(
+    prediction_df,
+    event_cluster,
+    threshold,
+    fps
+):
+
+    timeline_df = (
+        prediction_df
+        .sort_values("frame")
+        .reset_index(drop=True)
+        .copy()
+    )
+
+    timeline_df[
+        "time_seconds"
+    ] = (
+        (
+            timeline_df[
+                "frame"
+            ]
+            -
+            1
+        )
+        /
+        fps
+    )
+
+    timeline_df[
+        "status"
+    ] = "NORMAL"
+
+    timeline_df.loc[
+        timeline_df[
+            "fall_probability"
+        ] >= threshold,
+        "status"
+    ] = "HIGH RISK"
+
+    if event_cluster is not None:
+
+        event_frames = set(
+            event_cluster[
+                "frame"
+            ]
+            .astype(int)
+            .tolist()
+        )
+
+        timeline_df.loc[
+            timeline_df[
+                "frame"
+            ]
+            .astype(int)
+            .isin(event_frames),
+            "status"
+        ] = "FALL EVIDENCE"
+
+    return timeline_df
+
+
+def select_evidence_frames(
+    timeline_df,
+    event_cluster,
+    fps,
+    context_frames=8,
+    max_display_frames=9
+):
+
+    if event_cluster is None:
+
+        return pd.DataFrame()
+
+    event_start = int(
+        event_cluster[
+            "frame"
+        ].min()
+    )
+
+    event_end = int(
+        event_cluster[
+            "frame"
+        ].max()
+    )
+
+    start_frame = max(
+        1,
+        event_start
+        -
+        context_frames
+    )
+
+    end_frame = (
+        event_end
+        +
+        context_frames
+    )
+
+    evidence_df = (
+        timeline_df[
+            (
+                timeline_df[
+                    "frame"
+                ]
+                >=
+                start_frame
+            )
+            &
+            (
+                timeline_df[
+                    "frame"
+                ]
+                <=
+                end_frame
+            )
+        ]
+        .copy()
+    )
+
+    if evidence_df.empty:
+
+        return evidence_df
+
+    event_frame_set = set(
+        event_cluster[
             "frame"
         ]
         .astype(int)
         .tolist()
     )
 
-    if not risky_frames:
+    evidence_df[
+        "is_event"
+    ] = (
+        evidence_df[
+            "frame"
+        ]
+        .astype(int)
+        .isin(event_frame_set)
+    )
 
-        return (
-            False,
-            0
+    selected_rows = []
+
+    event_rows = (
+        evidence_df[
+            evidence_df[
+                "is_event"
+            ]
+        ]
+        .copy()
+    )
+
+    if not event_rows.empty:
+
+        event_indices = (
+            event_rows.index
+            .tolist()
         )
 
-    if minimum_frames <= 1:
+        if len(event_indices) > max_display_frames:
 
-        return (
-            True,
-            len(risky_frames)
+            selected_event_indices = np.linspace(
+                0,
+                len(event_indices) - 1,
+                max_display_frames
+            ).astype(int)
+
+            event_indices = [
+                event_indices[index]
+                for index in selected_event_indices
+            ]
+
+        selected_rows.extend(
+            event_indices
         )
 
-    longest_cluster = 1
-    current_cluster = 1
+    context_candidates = (
+        evidence_df[
+            ~evidence_df[
+                "is_event"
+            ]
+        ]
+        .copy()
+    )
 
-    for index in range(
-        1,
-        len(risky_frames)
-    ):
+    if len(
+        selected_rows
+    ) < max_display_frames:
 
-        frame_gap = (
-            risky_frames[index]
+        remaining = (
+            max_display_frames
             -
-            risky_frames[index - 1]
+            len(selected_rows)
         )
 
-        if frame_gap <= max_frame_gap:
+        if not context_candidates.empty:
 
-            current_cluster += 1
+            context_indices = np.linspace(
+                0,
+                len(context_candidates) - 1,
+                min(
+                    remaining,
+                    len(context_candidates)
+                )
+            ).astype(int)
 
-        else:
+            selected_rows.extend(
+                [
+                    context_candidates.index[index]
+                    for index in context_indices
+                ]
+            )
 
-            current_cluster = 1
+    selected_rows = list(
+        dict.fromkeys(
+            selected_rows
+        )
+    )
 
-        longest_cluster = max(
-            longest_cluster,
-            current_cluster
+    selected_df = (
+        evidence_df.loc[
+            selected_rows
+        ]
+        .sort_values("frame")
+        .reset_index(drop=True)
+    )
+
+    return selected_df
+
+
+def get_event_boundaries(
+    event_cluster,
+    fps
+):
+
+    if event_cluster is None:
+
+        return (
+            None,
+            None,
+            None,
+            None
         )
 
-    detected = (
-        longest_cluster
-        >=
-        minimum_frames
+    start_frame = int(
+        event_cluster[
+            "frame"
+        ].min()
+    )
+
+    end_frame = int(
+        event_cluster[
+            "frame"
+        ].max()
+    )
+
+    start_time = (
+        (
+            start_frame
+            -
+            1
+        )
+        /
+        fps
+    )
+
+    end_time = (
+        (
+            end_frame
+            -
+            1
+        )
+        /
+        fps
     )
 
     return (
-        detected,
-        longest_cluster
+        start_frame,
+        end_frame,
+        start_time,
+        end_time
     )
+
 
 try:
 
@@ -1433,6 +1944,7 @@ except Exception as error:
     )
 
     st.stop()
+
 
 st.title(
     "🛡️ SafeFall AI"
@@ -1601,6 +2113,7 @@ if uploaded_video is not None:
         )[1].lower()
 
         if not extension:
+
             extension = ".avi"
 
         temporary_path = None
@@ -1660,7 +2173,8 @@ if uploaded_video is not None:
 
             (
                 fall_detected,
-                high_risk_frames
+                high_risk_frames,
+                event_cluster
             ) = confirm_fall(
                 prediction_df,
                 threshold=fall_threshold,
@@ -1727,8 +2241,8 @@ if uploaded_video is not None:
                 )
 
                 st.error(
-                    "SafeFall AI detected movement "
-                    "consistent with a fall in the video."
+                    "SafeFall AI detected a sustained "
+                    "cluster of high-risk frames."
                 )
 
                 play_fall_alarm()
@@ -1776,6 +2290,332 @@ if uploaded_video is not None:
                     "Highest-Risk Time",
                     f"{highest_risk_time:.2f} s"
                 )
+
+            if fall_detected:
+
+                (
+                    event_start_frame,
+                    event_end_frame,
+                    event_start_time,
+                    event_end_time
+                ) = get_event_boundaries(
+                    event_cluster,
+                    fps
+                )
+
+                event_duration = (
+                    event_end_time
+                    -
+                    event_start_time
+                )
+
+                st.divider()
+
+                st.write(
+                    "## 🔍 How SafeFall Detected the Fall"
+                )
+
+                st.info(
+                    "SafeFall identified the fall from a "
+                    "cluster of nearby high-risk frames. "
+                    "The frames below show where the AI "
+                    "found the strongest fall evidence."
+                )
+
+                event_col1, event_col2, event_col3 = (
+                    st.columns(3)
+                )
+
+                with event_col1:
+
+                    st.metric(
+                        "Evidence Start",
+                        f"{event_start_time:.2f} s"
+                    )
+
+                with event_col2:
+
+                    st.metric(
+                        "Evidence End",
+                        f"{event_end_time:.2f} s"
+                    )
+
+                with event_col3:
+
+                    st.metric(
+                        "Evidence Frames",
+                        len(event_cluster)
+                    )
+
+                st.write(
+                    f"**Detected fall region:** "
+                    f"{event_start_time:.2f}s → "
+                    f"{event_end_time:.2f}s"
+                )
+
+                st.write(
+                    f"**Frame region:** "
+                    f"{event_start_frame:,} → "
+                    f"{event_end_frame:,}"
+                )
+
+                st.write(
+                    f"**Duration of detected evidence:** "
+                    f"{event_duration:.2f} seconds"
+                )
+
+                timeline_df = build_event_timeline(
+                    prediction_df,
+                    event_cluster,
+                    fall_threshold,
+                    fps
+                )
+
+                event_timeline = timeline_df[
+                    (
+                        timeline_df[
+                            "frame"
+                        ]
+                        >=
+                        max(
+                            1,
+                            event_start_frame
+                            -
+                            int(
+                                fps
+                                *
+                                1.5
+                            )
+                        )
+                    )
+                    &
+                    (
+                        timeline_df[
+                            "frame"
+                        ]
+                        <=
+                        event_end_frame
+                        +
+                        int(
+                            fps
+                            *
+                            1.5
+                        )
+                    )
+                ].copy()
+
+                timeline_display = (
+                    event_timeline[
+                        [
+                            "frame",
+                            "time_seconds",
+                            "fall_probability",
+                            "status"
+                        ]
+                    ]
+                    .copy()
+                )
+
+                timeline_display[
+                    "fall_probability"
+                ] = (
+                    timeline_display[
+                        "fall_probability"
+                    ]
+                    *
+                    100
+                ).round(1)
+
+                timeline_display[
+                    "time_seconds"
+                ] = (
+                    timeline_display[
+                        "time_seconds"
+                    ]
+                    .round(2)
+                )
+
+                timeline_display = (
+                    timeline_display.rename(
+                        columns={
+                            "frame":
+                                "Frame",
+
+                            "time_seconds":
+                                "Time (s)",
+
+                            "fall_probability":
+                                "AI Fall Risk (%)",
+
+                            "status":
+                                "AI Status"
+                        }
+                    )
+                )
+
+                st.write(
+                    "### 🧭 Fall Event Timeline"
+                )
+
+                st.dataframe(
+                    timeline_display,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.write(
+                    "### 🖼️ Frames Showing the Fall Detection"
+                )
+
+                evidence_df = select_evidence_frames(
+                    timeline_df,
+                    event_cluster,
+                    fps,
+                    context_frames=max(
+                        4,
+                        int(
+                            fps
+                            *
+                            0.4
+                        )
+                    ),
+                    max_display_frames=9
+                )
+
+                if not evidence_df.empty:
+
+                    frame_columns = st.columns(
+                        3
+                    )
+
+                    for index, evidence_row in (
+                        evidence_df.iterrows()
+                    ):
+
+                        frame_number = int(
+                            evidence_row[
+                                "frame"
+                            ]
+                        )
+
+                        timestamp = float(
+                            evidence_row[
+                                "time_seconds"
+                            ]
+                        )
+
+                        probability = float(
+                            evidence_row[
+                                "fall_probability"
+                            ]
+                        )
+
+                        status = (
+                            evidence_row[
+                                "status"
+                            ]
+                        )
+
+                        evidence_frame = (
+                            get_video_frame(
+                                temporary_path,
+                                frame_number
+                            )
+                        )
+
+                        if evidence_frame is None:
+
+                            continue
+
+                        displayed_evidence = (
+                            create_evidence_frame(
+                                evidence_frame,
+                                frame_number,
+                                timestamp,
+                                probability,
+                                status
+                            )
+                        )
+
+                        column = (
+                            frame_columns[
+                                index % 3
+                            ]
+                        )
+
+                        with column:
+
+                            st.image(
+                                displayed_evidence,
+                                use_container_width=True
+                            )
+
+                            if status == "FALL EVIDENCE":
+
+                                st.error(
+                                    f"Frame {frame_number:,} "
+                                    f"• {timestamp:.2f}s"
+                                )
+
+                            elif status == "HIGH RISK":
+
+                                st.warning(
+                                    f"Frame {frame_number:,} "
+                                    f"• {timestamp:.2f}s"
+                                )
+
+                            else:
+
+                                st.success(
+                                    f"Frame {frame_number:,} "
+                                    f"• {timestamp:.2f}s"
+                                )
+
+                    st.caption(
+                        "The red evidence frames are the "
+                        "nearby high-risk frames that contributed "
+                        "to the confirmed fall event."
+                    )
+
+                st.write(
+                    "### 📊 Fall Risk During the Detected Event"
+                )
+
+                event_chart_df = (
+                    event_timeline[
+                        [
+                            "time_seconds",
+                            "fall_probability"
+                        ]
+                    ]
+                    .copy()
+                )
+
+                event_chart_df[
+                    "AI Fall Risk (%)"
+                ] = (
+                    event_chart_df[
+                        "fall_probability"
+                    ]
+                    *
+                    100
+                )
+
+                event_chart_df = (
+                    event_chart_df[
+                        [
+                            "AI Fall Risk (%)"
+                        ]
+                    ]
+                )
+
+                st.line_chart(
+                    event_chart_df,
+                    y_label="AI fall risk (%)",
+                    x_label="Time"
+                )
+
+            st.divider()
 
             st.write(
                 "### 🔎 Highest-Risk Frame"
@@ -1878,15 +2718,18 @@ if uploaded_video is not None:
                     try:
 
                         if int(prediction) == 1:
+
                             return "FALL"
 
                         if int(prediction) == 0:
+
                             return "NOT_FALL"
 
                     except (
                         TypeError,
                         ValueError
                     ):
+
                         pass
 
                     return str(
@@ -2023,6 +2866,7 @@ if uploaded_video is not None:
                 except Exception:
 
                     pass
+
 
 st.divider()
 
