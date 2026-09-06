@@ -1,5 +1,6 @@
 import os
 import io
+import gc
 import math
 import wave
 import tempfile
@@ -11,6 +12,7 @@ import pandas as pd
 import streamlit as st
 import mediapipe as mp
 
+from types import SimpleNamespace
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -119,6 +121,67 @@ def create_pose_detector():
     return vision.PoseLandmarker.create_from_options(
         options
     )
+
+
+def snapshot_landmarks(
+    landmarks
+):
+
+    if landmarks is None:
+
+        return None
+
+    snapshot = []
+
+    for point in landmarks:
+
+        try:
+
+            x = float(
+                point.x
+            )
+
+            y = float(
+                point.y
+            )
+
+            visibility = getattr(
+                point,
+                "visibility",
+                1.0
+            )
+
+            if visibility is None:
+
+                visibility = 1.0
+
+            visibility = float(
+                visibility
+            )
+
+            snapshot.append(
+                SimpleNamespace(
+                    x=x,
+                    y=y,
+                    visibility=visibility
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+            AttributeError
+        ):
+
+            snapshot.append(
+                SimpleNamespace(
+                    x=float("nan"),
+                    y=float("nan"),
+                    visibility=0.0
+                )
+            )
+
+    return snapshot
 
 
 def get_landmark_visibility(point):
@@ -997,50 +1060,55 @@ def extract_video_features(
 
             frame_number += 1
 
-            rgb_frame = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2RGB
-            )
-
-            timestamp_ms = int(
-                (
-                    (
-                        frame_number - 1
-                    )
-                    /
-                    max(
-                        fps,
-                        1e-6
-                    )
-                )
-                *
-                1000
-            )
-
-            if (
-                timestamp_ms
-                <=
-                previous_timestamp
-            ):
-
-                timestamp_ms = (
-                    previous_timestamp
-                    +
-                    1
-                )
-
-            previous_timestamp = (
-                timestamp_ms
-            )
-
-            mp_image = mp.Image(
-                image_format=(
-                    mp.ImageFormat.SRGB
-                ),
-                data=rgb_frame
-            )
+            rgb_frame = None
+            mp_image = None
+            result = None
+            landmarks = None
 
             try:
+
+                rgb_frame = cv2.cvtColor(
+                    frame,
+                    cv2.COLOR_BGR2RGB
+                )
+
+                timestamp_ms = int(
+                    (
+                        (
+                            frame_number - 1
+                        )
+                        /
+                        max(
+                            fps,
+                            1e-6
+                        )
+                    )
+                    *
+                    1000
+                )
+
+                if (
+                    timestamp_ms
+                    <=
+                    previous_timestamp
+                ):
+
+                    timestamp_ms = (
+                        previous_timestamp
+                        +
+                        1
+                    )
+
+                previous_timestamp = (
+                    timestamp_ms
+                )
+
+                mp_image = mp.Image(
+                    image_format=(
+                        mp.ImageFormat.SRGB
+                    ),
+                    data=rgb_frame
+                )
 
                 result = (
                     detector.detect_for_video(
@@ -1049,46 +1117,58 @@ def extract_video_features(
                     )
                 )
 
+                if not result.pose_landmarks:
+
+                    previous_landmarks = None
+
+                else:
+
+                    landmarks = (
+                        result.pose_landmarks[0]
+                    )
+
+                    features = (
+                        calculate_features(
+                            landmarks,
+                            previous_landmarks
+                        )
+                    )
+
+                    if features is not None:
+
+                        previous_landmarks = (
+                            snapshot_landmarks(
+                                landmarks
+                            )
+                        )
+
+                        row = (
+                            features.copy()
+                        )
+
+                        row["frame"] = (
+                            frame_number
+                        )
+
+                        rows.append(
+                            row
+                        )
+
+                    else:
+
+                        previous_landmarks = None
+
             except Exception:
 
                 previous_landmarks = None
 
-                continue
+            finally:
 
-            if not result.pose_landmarks:
-
-                previous_landmarks = None
-
-            else:
-
-                landmarks = (
-                    result.pose_landmarks[0]
-                )
-
-                features = (
-                    calculate_features(
-                        landmarks,
-                        previous_landmarks
-                    )
-                )
-
-                if features is not None:
-
-                    previous_landmarks = (
-                        landmarks
-                    )
-
-                    row = (
-                        features.copy()
-                    )
-
-                    row["frame"] = (
-                        frame_number
-                    )
-
-                    rows.append(
-                        row
-                    )
+                landmarks = None
+                result = None
+                mp_image = None
+                rgb_frame = None
+                frame = None
 
             if (
                 progress_bar is not None
@@ -1126,6 +1206,10 @@ def extract_video_features(
                     )
                 )
 
+            if frame_number % 100 == 0:
+
+                gc.collect()
+
         if progress_bar is not None:
 
             progress_bar.progress(
@@ -1143,6 +1227,8 @@ def extract_video_features(
             rows
         )
 
+        gc.collect()
+
         return (
             df,
             fps,
@@ -1150,6 +1236,8 @@ def extract_video_features(
         )
 
     finally:
+
+        previous_landmarks = None
 
         if capture is not None:
 
@@ -1161,6 +1249,8 @@ def extract_video_features(
 
                 pass
 
+            capture = None
+
         if detector is not None:
 
             try:
@@ -1171,6 +1261,9 @@ def extract_video_features(
 
                 pass
 
+            detector = None
+
+        gc.collect()
 
 def validate_model_features(
     feature_columns
