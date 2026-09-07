@@ -2120,8 +2120,52 @@ st.write(
     "frame-by-frame and determine whether a fall occurred."
 )
 
+st.markdown(
+    """
+    <style>
+    .upload-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+    }
+    .upload-complete {
+        border: 1px solid rgba(49, 51, 63, 0.18);
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-top: 8px;
+        background: rgba(250, 250, 250, 0.55);
+    }
+    .upload-complete-text {
+        display: flex;
+        justify-content: space-between;
+        font-weight: 700;
+        margin-bottom: 8px;
+    }
+    .upload-track {
+        width: 100%;
+        height: 14px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(128, 128, 128, 0.22);
+    }
+    .upload-fill {
+        width: 100%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #00c853, #64dd17);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="upload-title">📤 Upload your video</div>',
+    unsafe_allow_html=True
+)
+
 uploaded_video = st.file_uploader(
-    "Upload a video",
+    "Choose a video file",
     type=[
         "mp4",
         "avi",
@@ -2129,7 +2173,8 @@ uploaded_video = st.file_uploader(
         "mkv",
         "mpeg",
         "mpg"
-    ]
+    ],
+    label_visibility="collapsed"
 )
 
 with st.expander(
@@ -2175,6 +2220,25 @@ with st.expander(
 if uploaded_video is not None:
 
     video_bytes = uploaded_video.getvalue()
+    uploaded_size_mb = len(video_bytes) / (1024 * 1024)
+
+    st.markdown(
+        f"""
+        <div class="upload-complete">
+            <div class="upload-complete-text">
+                <span>📦 Video uploaded</span>
+                <span>100%</span>
+            </div>
+            <div class="upload-track">
+                <div class="upload-fill"></div>
+            </div>
+            <div style="margin-top:7px; font-size:0.9rem; opacity:0.8;">
+                {uploaded_size_mb:.2f} MB ready for analysis
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     st.write(
         "### 🎞️ Uploaded Video"
