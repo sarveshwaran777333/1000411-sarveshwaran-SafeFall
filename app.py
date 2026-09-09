@@ -4,6 +4,9 @@ import gc
 import math
 import wave
 import tempfile
+import subprocess
+import glob
+import shutil
 
 import cv2
 import joblib
@@ -995,70 +998,162 @@ def extract_video_features(
 ):
 
     detector = None
-    capture = None
+    frame_folder = None
 
     try:
 
-        detector = (
-            create_pose_detector()
-        )
+        # --------------------------------------------------------
+        # Create MediaPipe pose detector
+        # --------------------------------------------------------
+        detector = create_pose_detector()
 
-        capture = (
-            cv2.VideoCapture(
-                video_path
+        # --------------------------------------------------------
+        # Get video information with FFprobe instead of
+        # cv2.VideoCapture. This avoids using OpenCV's video
+        # decoder for the uploaded video.
+        # --------------------------------------------------------
+        probe_command = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate,nb_read_frames",
+            "-of",
+            "default=noprint_wrappers=1",
+            video_path
+        ]
+
+        try:
+            probe_result = subprocess.run(
+                probe_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
             )
-        )
-
-        if not capture.isOpened():
-
+        except Exception as e:
             raise RuntimeError(
-                "OpenCV could not open "
-                "the uploaded video."
+                f"FFprobe could not inspect the uploaded video: {e}"
             )
 
-        fps = capture.get(
-            cv2.CAP_PROP_FPS
+        if probe_result.returncode != 0:
+            detail = probe_result.stderr.strip()
+            raise RuntimeError(
+                "FFprobe could not read the uploaded video."
+                + (f"\n{detail}" if detail else "")
+            )
+
+        probe_values = {}
+        for line in probe_result.stdout.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                probe_values[key.strip()] = value.strip()
+
+        frame_count_text = probe_values.get("nb_read_frames", "")
+        total_frames = (
+            int(frame_count_text)
+            if frame_count_text.isdigit()
+            else 0
         )
 
-        if (
-            fps is None
-            or
-            fps <= 0
-            or
-            not np.isfinite(fps)
-        ):
+        fps = 25.0
+        frame_rate = probe_values.get("r_frame_rate", "")
 
-            fps = 25.0
+        if frame_rate and "/" in frame_rate:
+            numerator, denominator = frame_rate.split("/", 1)
+            try:
+                numerator = float(numerator)
+                denominator = float(denominator)
+                if denominator != 0:
+                    candidate_fps = numerator / denominator
+                    if np.isfinite(candidate_fps) and candidate_fps > 0:
+                        fps = float(candidate_fps)
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
 
-        fps = float(
-            fps
+        # --------------------------------------------------------
+        # Extract video frames with FFmpeg.
+        # This is adapted from SafeFall AI Code 2, but here we
+        # extract the complete uploaded video because there is no
+        # annotation file for a user's test video.
+        # --------------------------------------------------------
+        frame_folder = tempfile.mkdtemp(
+            prefix="safefall_frames_"
         )
 
-        total_frames = int(
-            capture.get(
-                cv2.CAP_PROP_FRAME_COUNT
+        output_pattern = os.path.join(
+            frame_folder,
+            "frame_%08d.jpg"
+        )
+
+        extract_command = [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-i",
+            video_path,
+            "-vf",
+            "scale=224:224",
+            "-vsync",
+            "0",
+            "-q:v",
+            "2",
+            output_pattern
+        ]
+
+        try:
+            extract_result = subprocess.run(
+                extract_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"FFmpeg could not extract video frames: {e}"
+            )
+
+        if extract_result.returncode != 0:
+            detail = extract_result.stderr.strip()
+            raise RuntimeError(
+                "FFmpeg could not process the uploaded video."
+                + (f"\n{detail}" if detail else "")
+            )
+
+        frame_paths = sorted(
+            glob.glob(
+                os.path.join(
+                    frame_folder,
+                    "frame_*.jpg"
+                )
             )
         )
+
+        if not frame_paths:
+            raise RuntimeError(
+                "FFmpeg did not extract any frames from this video."
+            )
+
+        # Use the actual extracted-frame count when FFprobe could
+        # not provide one.
+        if total_frames <= 0:
+            total_frames = len(frame_paths)
 
         rows = []
-
-        frame_number = 0
-
         previous_landmarks = None
-
         previous_timestamp = -1
 
-        while True:
-
-            success, frame = (
-                capture.read()
-            )
-
-            if not success:
-
-                break
-
-            frame_number += 1
+        # --------------------------------------------------------
+        # Run MediaPipe on the extracted JPEG frames.
+        # --------------------------------------------------------
+        for frame_number, frame_path in enumerate(
+            frame_paths,
+            start=1
+        ):
 
             rgb_frame = None
             mp_image = None
@@ -1066,6 +1161,16 @@ def extract_video_features(
             landmarks = None
 
             try:
+
+                # JPEG decoding only; no OpenCV video decoding.
+                frame = cv2.imread(
+                    frame_path,
+                    cv2.IMREAD_COLOR
+                )
+
+                if frame is None:
+                    previous_landmarks = None
+                    continue
 
                 rgb_frame = cv2.cvtColor(
                     frame,
@@ -1083,79 +1188,48 @@ def extract_video_features(
                             1e-6
                         )
                     )
-                    *
-                    1000
+                    * 1000
                 )
 
-                if (
-                    timestamp_ms
-                    <=
-                    previous_timestamp
-                ):
+                if timestamp_ms <= previous_timestamp:
+                    timestamp_ms = previous_timestamp + 1
 
-                    timestamp_ms = (
-                        previous_timestamp
-                        +
-                        1
-                    )
-
-                previous_timestamp = (
-                    timestamp_ms
-                )
+                previous_timestamp = timestamp_ms
 
                 mp_image = mp.Image(
-                    image_format=(
-                        mp.ImageFormat.SRGB
-                    ),
+                    image_format=mp.ImageFormat.SRGB,
                     data=rgb_frame
                 )
 
-                result = (
-                    detector.detect_for_video(
-                        mp_image,
-                        timestamp_ms
-                    )
+                result = detector.detect_for_video(
+                    mp_image,
+                    timestamp_ms
                 )
 
                 if not result.pose_landmarks:
-
                     previous_landmarks = None
-
                 else:
 
-                    landmarks = (
-                        result.pose_landmarks[0]
-                    )
+                    landmarks = result.pose_landmarks[0]
 
-                    features = (
-                        calculate_features(
-                            landmarks,
-                            previous_landmarks
-                        )
+                    features = calculate_features(
+                        landmarks,
+                        previous_landmarks
                     )
 
                     if features is not None:
 
-                        previous_landmarks = (
-                            snapshot_landmarks(
-                                landmarks
-                            )
+                        # Keep only plain Python/float landmark data
+                        # between frames; do not retain MediaPipe's
+                        # native landmark objects.
+                        previous_landmarks = snapshot_landmarks(
+                            landmarks
                         )
 
-                        row = (
-                            features.copy()
-                        )
-
-                        row["frame"] = (
-                            frame_number
-                        )
-
-                        rows.append(
-                            row
-                        )
-
+                        row = features.copy()
+                        row["frame"] = frame_number
+                        rows.append(row)
                     else:
-
                         previous_landmarks = None
 
             except Exception:
@@ -1172,61 +1246,39 @@ def extract_video_features(
 
             if (
                 progress_bar is not None
-                and
-                total_frames > 0
-                and
-                frame_number % 5 == 0
+                and total_frames > 0
+                and frame_number % 5 == 0
             ):
 
                 progress = min(
-                    frame_number
-                    /
-                    total_frames,
+                    frame_number / total_frames,
                     1.0
                 )
 
-                progress_bar.progress(
-                    progress
-                )
+                progress_bar.progress(progress)
 
             if (
                 status_box is not None
-                and
-                frame_number % 20 == 0
+                and frame_number % 20 == 0
             ):
 
                 status_box.write(
-                    f"Processing frame "
-                    f"{frame_number:,}"
-                    +
-                    (
-                        f" / {total_frames:,}"
-                        if total_frames > 0
-                        else ""
-                    )
+                    f"Processing frame {frame_number:,}"
+                    f" / {total_frames:,}"
                 )
 
             if frame_number % 100 == 0:
-
                 gc.collect()
 
         if progress_bar is not None:
-
-            progress_bar.progress(
-                1.0
-            )
+            progress_bar.progress(1.0)
 
         if not rows:
-
             raise RuntimeError(
-                "No usable human pose could be "
-                "detected in this video."
+                "No usable human pose could be detected in this video."
             )
 
-        df = pd.DataFrame(
-            rows
-        )
-
+        df = pd.DataFrame(rows)
         gc.collect()
 
         return (
@@ -1239,29 +1291,20 @@ def extract_video_features(
 
         previous_landmarks = None
 
-        if capture is not None:
-
-            try:
-
-                capture.release()
-
-            except Exception:
-
-                pass
-
-            capture = None
-
         if detector is not None:
-
             try:
-
                 detector.close()
-
             except Exception:
-
                 pass
-
             detector = None
+
+        # Remove all temporary extracted JPEG frames.
+        if frame_folder is not None:
+            try:
+                shutil.rmtree(frame_folder, ignore_errors=True)
+            except Exception:
+                pass
+            frame_folder = None
 
         gc.collect()
 
@@ -2120,52 +2163,8 @@ st.write(
     "frame-by-frame and determine whether a fall occurred."
 )
 
-st.markdown(
-    """
-    <style>
-    .upload-title {
-        font-size: 1.05rem;
-        font-weight: 700;
-        margin-bottom: 0.35rem;
-    }
-    .upload-complete {
-        border: 1px solid rgba(49, 51, 63, 0.18);
-        border-radius: 10px;
-        padding: 12px 14px;
-        margin-top: 8px;
-        background: rgba(250, 250, 250, 0.55);
-    }
-    .upload-complete-text {
-        display: flex;
-        justify-content: space-between;
-        font-weight: 700;
-        margin-bottom: 8px;
-    }
-    .upload-track {
-        width: 100%;
-        height: 14px;
-        border-radius: 999px;
-        overflow: hidden;
-        background: rgba(128, 128, 128, 0.22);
-    }
-    .upload-fill {
-        width: 100%;
-        height: 100%;
-        border-radius: 999px;
-        background: linear-gradient(90deg, #00c853, #64dd17);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="upload-title">📤 Upload your video</div>',
-    unsafe_allow_html=True
-)
-
 uploaded_video = st.file_uploader(
-    "Choose a video file",
+    "Upload a video",
     type=[
         "mp4",
         "avi",
@@ -2173,8 +2172,7 @@ uploaded_video = st.file_uploader(
         "mkv",
         "mpeg",
         "mpg"
-    ],
-    label_visibility="collapsed"
+    ]
 )
 
 with st.expander(
@@ -2220,25 +2218,6 @@ with st.expander(
 if uploaded_video is not None:
 
     video_bytes = uploaded_video.getvalue()
-    uploaded_size_mb = len(video_bytes) / (1024 * 1024)
-
-    st.markdown(
-        f"""
-        <div class="upload-complete">
-            <div class="upload-complete-text">
-                <span>📦 Video uploaded</span>
-                <span>100%</span>
-            </div>
-            <div class="upload-track">
-                <div class="upload-fill"></div>
-            </div>
-            <div style="margin-top:7px; font-size:0.9rem; opacity:0.8;">
-                {uploaded_size_mb:.2f} MB ready for analysis
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
 
     st.write(
         "### 🎞️ Uploaded Video"
